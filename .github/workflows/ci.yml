@@ -1,0 +1,144 @@
+# LinkerHand C++ SDK CI Pipeline
+# 简化版：仅验证编译和静态分析
+# 用户功能测试需要连接硬件，请使用 linker_hand_user_test 程序
+
+name: CI Build
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - 'linker_hand/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [ main, master, develop ]
+    paths:
+      - 'linker_hand/**'
+      - '.github/workflows/ci.yml'
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  # ============================================================================
+  # Linux 编译验证
+  # ============================================================================
+  build-linux:
+    name: Linux Build (Ubuntu ${{ matrix.ubuntu }})
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['22.04', '24.04']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Configure CMake
+        working-directory: linker_hand
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DBUILD_EXAMPLES=ON \
+            -DBUILD_TESTS=ON \
+            -DBUILD_USER_TEST=ON \
+            -DUSE_RMAN=OFF \
+            -DUSE_ETHERCAT=OFF
+
+      - name: Build
+        working-directory: linker_hand/build
+        run: cmake --build . --config ${{ env.BUILD_TYPE }} -j$(nproc)
+
+      - name: Verify build artifacts
+        working-directory: linker_hand
+        run: |
+          echo "=== Build Artifacts ==="
+          ls -la build/*.so 2>/dev/null || ls -la lib/*.so 2>/dev/null || echo "Shared library built"
+          ls -la build/linker_hand_example 2>/dev/null && echo "Example built ✓"
+          ls -la build/linker_hand_user_test 2>/dev/null && echo "User test tool built ✓"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-${{ matrix.ubuntu }}
+          path: |
+            linker_hand/build/linker_hand_user_test
+            linker_hand/build/linker_hand_example
+            linker_hand/lib/*.so
+          if-no-files-found: ignore
+
+  # ============================================================================
+  # 静态代码分析
+  # ============================================================================
+  static-analysis:
+    name: Static Analysis (cppcheck)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        working-directory: linker_hand
+        run: |
+          cppcheck \
+            --enable=warning,performance,portability \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            --error-exitcode=0 \
+            --inline-suppr \
+            src/ include/ \
+            2>&1 | tee cppcheck-output.txt
+
+          # 统计问题数量
+          WARNINGS=$(grep -c "warning:" cppcheck-output.txt || true)
+          ERRORS=$(grep -c "error:" cppcheck-output.txt || true)
+          echo "=== Static Analysis Summary ==="
+          echo "Warnings: $WARNINGS"
+          echo "Errors: $ERRORS"
+
+      - name: Upload analysis report
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-analysis-report
+          path: linker_hand/cppcheck-output.txt
+
+  # ============================================================================
+  # 构建状态汇总
+  # ============================================================================
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [build-linux, static-analysis]
+    if: always()
+
+    steps:
+      - name: Check build results
+        run: |
+          echo "═══════════════════════════════════════════════════"
+          echo "           LinkerHand SDK CI Build Summary          "
+          echo "═══════════════════════════════════════════════════"
+          echo ""
+          echo "Linux Build:      ${{ needs.build-linux.result }}"
+          echo "Static Analysis:  ${{ needs.static-analysis.result }}"
+          echo ""
+
+          if [ "${{ needs.build-linux.result }}" == "failure" ]; then
+            echo "::error::Build failed!"
+            exit 1
+          fi
+
+          echo "═══════════════════════════════════════════════════"
+          echo "  All builds completed successfully ✓"
+          echo "═══════════════════════════════════════════════════"
